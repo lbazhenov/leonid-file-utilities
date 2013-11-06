@@ -51,7 +51,14 @@ import java.nio.file.attribute.BasicFileAttributes;
  */
 public class FileUtils
 {
+  /**
+  * Normalization means here that all back slashes are converted to forward slashes.  
+  */
   public static final String    NORM_FILE_SEPARATOR = "/";
+  
+  /**
+   * Regular expression to be used to find wild card in the path. This reqex is for finding <code>glob</code> expression.
+   */
   public static final String    GLOB_CHARS_REGEX = "\\{.+\\}|\\[.+\\]|\\?+|\\*{1,2}";// pattern to find glob expression in the path
 
   protected static final FileSystem  fileSystem = FileSystems.getDefault();
@@ -319,7 +326,7 @@ public class FileUtils
   }
   
   /**
-   * Helper method to work file tree.
+   * Helper method to walk file tree.
    * 
    * @param fileList is the list of files to collect if it's not <code>null</code>.
    * @param startPath is the path, which may contain wild card in <code>glob</code> syntax.
@@ -408,7 +415,24 @@ public class FileUtils
     FileVisitor<? super Path> visitor;
     FileFilter                fileFilter;
     
-
+    /**
+     * Constructs <code>FileVisitor</code> implementation object.
+     * 
+     * @param fileList is the list of files, which patched wild card in <code>glob</code> syntax. This list object is not <code>null</code>
+     *                 in the case if client invokes <code>listFiles</code> method. If it is <code>null</code> then
+     *                 matched file path is not stored. It means that client has called <code>walkFileTree</code> method and 
+     *                 provided it's own <code>FileVisitor</code> implementation. <b>NOTE</b> that custom <code>FileVisitor</code> implementation
+     *                 is invoked from this visitor and only for matched paths. 
+     * @param pathMatcher is path matcher, which is built based on wild card created by <code>splitPathToBaseDirAndWildcard</code> method. 
+     * @param pathMatcherStartIndex is an index of the first path name element, which is start of wild card. 
+     * @param visitor is <code>FileVisitor</code>, which is provided by the caller of <code>walkFileTree</code> method. <code>listFiles</code> method
+     *                passes <code>null</code>.  
+     * @param fileFilter is <code>FileFilter</code> implementation object for filter files further after the match. If it's <code>null</code>
+     *                   then all matched files are considered.  
+     * 
+     * @see java.nio.file.SimpleFileVisitor
+     * @see java.nio.file.FileVisitor
+     */
     public ListFileVisitor(List<Path> fileList, PathMatcher pathMatcher, int pathMatcherStartIndex, FileVisitor<? super Path> visitor, FileFilter fileFilter)
     {
       this.fileList = fileList;
@@ -418,6 +442,10 @@ public class FileUtils
       this.fileFilter = fileFilter;
     }
 
+   
+    /**
+     * @see java.nio.file.FileVisitor#visitFile(Path, BasicFileAttributes)
+     */ 
     @Override
     public FileVisitResult visitFile(Path filePath, BasicFileAttributes attrs) throws IOException
     {
@@ -436,18 +464,27 @@ public class FileUtils
       return visitResult;
     }
     
+    /**
+     * @see java.nio.file.FileVisitor#preVisitDirectory(Path, BasicFileAttributes)
+     */
     @Override
     public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException
     {
       return visitor != null ? visitor.preVisitDirectory(dir, attrs) : super.preVisitDirectory(dir, attrs); 
     }
-     
+    
+    /**
+     * @see java.nio.file.FileVisitor#postVisitDirectory(Path, IOException)
+     */
     @Override
     public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException
     {
       return visitor != null ? visitor.postVisitDirectory(dir, exc) : super.postVisitDirectory(dir, exc); 
     }    
     
+    /**
+     * @see java.nio.file.FileVisitor#visitFileFailed(Path, IOException)
+     */
     @Override
     public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException
     {
