@@ -1,6 +1,7 @@
 package leonid.util;
 
 import java.io.IOException;
+
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
@@ -8,6 +9,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -133,7 +135,8 @@ public class FileUtils
     // and dynamic wildcard path portion.
     else
     {
-      pathStr = pathStr.replaceAll("\\\\", NORM_FILE_SEPARATOR);  // normalize scan path to have only right slashes...
+      // normalize scan path to have only right slashes and remove duplicated slashes
+      pathStr = pathStr.replaceAll("\\\\", NORM_FILE_SEPARATOR).replaceAll("/{2,}", NORM_FILE_SEPARATOR);  
 
       // Create the matcher to detect glob expression in the path
       Matcher       globMatcher = globPattern.matcher(pathStr);
@@ -196,7 +199,7 @@ public class FileUtils
           }
         }
         
-        // Remove last file separator in the wildcard since it does not make nay sense 
+        // Remove last file separator in the wildcard since it does not make any sense 
         if (wildcardPath.wildcard.lastIndexOf(NORM_FILE_SEPARATOR) == wildcardPath.wildcard.length()-1)
         {
           wildcardPath.wildcard = wildcardPath.wildcard.substring(0, wildcardPath.wildcard.length()-1); 
@@ -341,63 +344,52 @@ public class FileUtils
                                     FileVisitor<? super Path> visitor, FileFilter fileFilter) throws IOException
   {
     WildcardPath  wildcardPath = splitPathToBaseDirAndWildcard(startPath);
-    Path          startDir = null;
-    Path          startingFileFound = null;
+    Path          startingFileFound = null; // Path to the starting directory to be visited
+    int           maxDepth; // Max directory depth to visit
+    
+    wildcardPath.baseDir = wildcardPath.baseDir.toRealPath();
 
-    startDir = wildcardPath.baseDir.toRealPath();
-
-    if (startDir != null)
+    if (wildcardPath.baseDir != null)
     {
-      // Listing the directory is needed only if path points to the directory
-      if (Files.isDirectory(startDir))
+      if (options == null)  options = EnumSet.noneOf(FileVisitOption.class);
+
+      // If wild card portion of the path is not present then
+      // just list the directory, which is present by the path
+      // without visiting any sub directories.
+      if (wildcardPath.wildcard == null)
       {
-        if (options == null)  options = EnumSet.noneOf(FileVisitOption.class);
-
-        // If wild card portion of the path is not present then
-        // just list the directory, which is present by the path
-        // without visiting any sub directories.
-        if (wildcardPath.wildcard == null)
-        {
-          startingFileFound = Files.walkFileTree(startDir, options, 1 /* visit only this directory */,
-              new ListFileVisitor(fileList /* file list to collect */,
-                    null/* path matcher is null, i.e. all visited files will be added to the list*/,
-                    0 /* value does not matter for null path matcher */,
-                    visitor,
-                    fileFilter /* wildcard is a base filter, after which file can be removed from the list as per fileFilter */));
-        }
-        else
-        {
-          int maxDepth = Integer.MAX_VALUE;
-
-          // If '**' pattern is present in the path wildcard then directory search depth must
-          // be maximum, since it's recursive directory pattern.
-          // Otherwise we need to calculate the search directory depth.
-          if (wildcardPath.wildcard.indexOf("**") == -1)
-          {
-            int separatorIndex = -1;
-            int separatorCount = 0;
-
-            while ((separatorIndex = wildcardPath.wildcard.indexOf(NORM_FILE_SEPARATOR, separatorIndex+1)) > -1)
-            {
-              separatorCount++;
-            }
-
-            maxDepth = separatorCount + 1;
-          }
-
-          startingFileFound = Files.walkFileTree(startDir, options, maxDepth /* visit as deeper as estimated above based on wildcard */,
-              new ListFileVisitor(fileList /* file list to collect */,
-                    fileSystem.getPathMatcher("glob:" + wildcardPath.wildcard) /* only those files to be added to the list, which path is matched by path matcher */,
-                    startDir.getNameCount() /* Path element start index of the path matcher in the absolute path from where to apply matcher pattern */,
-                    visitor,
-                    fileFilter /* wildcard is a base filter, after which file can be removed from the list as per fileFilter */));
-        }
+        maxDepth = 1;
       }
-      // Given path is actual file, hence just return path to it only
       else
       {
-        fileList.add(startDir);
+        // If '**' pattern is not present in the path wild card then
+        // we need to calculate the walk directory depth.
+        if (wildcardPath.wildcard.indexOf("**") == -1)
+        {
+          int separatorIndex = -1;
+          int separatorCount = 0;
+
+          while ((separatorIndex = wildcardPath.wildcard.indexOf(NORM_FILE_SEPARATOR, separatorIndex+1)) > -1)
+          {
+            separatorCount++;
+          }
+
+          maxDepth = separatorCount + 1;
+        }
+        // If '**' pattern is present in the path wild card then walk directory
+        // depth must be maximum, since it's recursive directory pattern.
+        else 
+        {
+          maxDepth = Integer.MAX_VALUE;
+        }
       }
+      
+      startingFileFound = Files.walkFileTree(wildcardPath.baseDir, options, maxDepth /* visit as deeper as estimated above based on wild card */,
+          new ListFileVisitor(
+                fileList /* file list to collect */,
+                wildcardPath, /* directory path to walk with wild card portion */
+                visitor, /* custom visitor to invoke after the wild card match if it's present*/
+                fileFilter /* wild card is a base filter, after which file can be filtered further as per fileFilter */));
     }
     
     return startingFileFound;
@@ -409,11 +401,13 @@ public class FileUtils
   */
   protected static class ListFileVisitor extends SimpleFileVisitor<Path>
   {
-    PathMatcher               pathMatcher;
+    List<PathMatcher>         pathMatchers = null;
     List<Path>                fileList;
-    int                       pathMatcherStartIndex;
     FileVisitor<? super Path> visitor;
     FileFilter                fileFilter;
+    
+    int                       wildcardStartIndex = 0;     // start index in wild card with respect of absolute path 
+    int                       pathMatcherLastIndex = -1;  // last index of path matchers built based on wild card and it's sub patterns delimited by slashes
     
     /**
      * Constructs <code>FileVisitor</code> implementation object.
@@ -423,8 +417,7 @@ public class FileUtils
      *                 matched file path is not stored. It means that client has called <code>walkFileTree</code> method and 
      *                 provided it's own <code>FileVisitor</code> implementation. <b>NOTE</b> that custom <code>FileVisitor</code> implementation
      *                 is invoked from this visitor and only for matched paths. 
-     * @param pathMatcher is path matcher, which is built based on wild card created by <code>splitPathToBaseDirAndWildcard</code> method. 
-     * @param pathMatcherStartIndex is an index of the first path name element, which is start of wild card. 
+     * @param wildcardPath is the path to directory to walk, which is built by <code>splitPathToBaseDirAndWildcard</code> method. 
      * @param visitor is <code>FileVisitor</code>, which is provided by the caller of <code>walkFileTree</code> method. <code>listFiles</code> method
      *                passes <code>null</code>.  
      * @param fileFilter is <code>FileFilter</code> implementation object for filter files further after the match. If it's <code>null</code>
@@ -433,15 +426,30 @@ public class FileUtils
      * @see java.nio.file.SimpleFileVisitor
      * @see java.nio.file.FileVisitor
      */
-    public ListFileVisitor(List<Path> fileList, PathMatcher pathMatcher, int pathMatcherStartIndex, FileVisitor<? super Path> visitor, FileFilter fileFilter)
+    public ListFileVisitor(List<Path> fileList, WildcardPath wildcardPath, FileVisitor<? super Path> visitor, FileFilter fileFilter)
     {
       this.fileList = fileList;
-      this.pathMatcher = pathMatcher;
-      this.pathMatcherStartIndex = pathMatcherStartIndex;
       this.visitor = visitor;
       this.fileFilter = fileFilter;
+      
+      // Wild card start index is the next index of last name element in base directory
+      wildcardStartIndex = wildcardPath.baseDir.getNameCount();
+      
+      // If wild cared is not null then it's needed to build path matchers. 
+      if (wildcardPath.wildcard != null)
+      {
+        pathMatchers = new ArrayList<>();
+        
+        // Build path matchers based on the first name element of wild card, then first/second, then first/second/third, etc.
+        for (int separatorIndex = -1; (separatorIndex=wildcardPath.wildcard.indexOf(NORM_FILE_SEPARATOR, separatorIndex+1)) > -1;)
+        {
+          pathMatchers.add(fileSystem.getPathMatcher("glob:" + wildcardPath.wildcard.substring(0, separatorIndex)));
+        }
+        
+        pathMatchers.add(fileSystem.getPathMatcher("glob:" + wildcardPath.wildcard));
+        pathMatcherLastIndex = pathMatchers.size() - 1;
+      }
     }
-
    
     /**
      * @see java.nio.file.FileVisitor#visitFile(Path, BasicFileAttributes)
@@ -451,7 +459,7 @@ public class FileUtils
     {
       FileVisitResult   visitResult = FileVisitResult.CONTINUE;
       
-      boolean   isAddFile = pathMatcher == null || pathMatcher.matches(filePath.subpath(pathMatcherStartIndex, filePath.getNameCount()));
+      boolean   isAddFile = pathMatchers==null || pathMatchers.get(pathMatcherLastIndex).matches(filePath.subpath(wildcardStartIndex, filePath.getNameCount()));
       
       if (isAddFile && fileFilter != null) isAddFile = fileFilter.fileAdd(filePath, attrs);
       
@@ -470,7 +478,26 @@ public class FileUtils
     @Override
     public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException
     {
-      return visitor != null ? visitor.preVisitDirectory(dir, attrs) : super.preVisitDirectory(dir, attrs); 
+      FileVisitResult   visitResult = FileVisitResult.CONTINUE;
+      int               dirNameCount = dir.getNameCount();
+
+      if (pathMatchers!=null && dirNameCount > wildcardStartIndex)
+      {
+        Path    subDir = dir.subpath(wildcardStartIndex, dirNameCount);
+        int     pathMathcerIndex = subDir.getNameCount() - 1;
+        
+        if (pathMathcerIndex > pathMatcherLastIndex || ! pathMatchers.get(pathMathcerIndex).matches(subDir))
+        {
+          visitResult = FileVisitResult.SKIP_SUBTREE;
+        }
+      }
+      
+      if (visitResult == FileVisitResult.CONTINUE && visitor != null)
+      {
+        visitResult = visitor.preVisitDirectory(dir, attrs);
+      }
+
+      return visitResult; 
     }
     
     /**
@@ -486,9 +513,9 @@ public class FileUtils
      * @see java.nio.file.FileVisitor#visitFileFailed(Path, IOException)
      */
     @Override
-    public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException
+    public FileVisitResult visitFileFailed(Path filePath, IOException exc) throws IOException
     {
-      return visitor != null ? visitor.visitFileFailed(file, exc) : super.visitFileFailed(file, exc);
+      return visitor != null ? visitor.visitFileFailed(filePath, exc) : FileVisitResult.CONTINUE /*By default we continue ignoring any exception*/;
     }
   }
 }
