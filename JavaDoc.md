@@ -1,0 +1,1 @@
+For details, please refer to the following [JavaDoc](https://leonid-file-utilities.googlecode.com/svn/trunk/file-utils/javadoc/apidocs/index.html)
